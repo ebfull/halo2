@@ -14,7 +14,7 @@ use super::{
 use crate::poly::{
     commitment::{Blind, Params},
     multiopen::{self, ProverQuery},
-    Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
+    Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, PolyAST, PolyEvaluator, Polynomial,
 };
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine, FieldExt},
@@ -401,21 +401,56 @@ pub fn create_proof<
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
+    // Create polynomial evaluator context
+    let mut evaluator = PolyEvaluator::default();
+
+    // Register fixed polynomials with the polynomial evaluator
+    let fixed_leaves: Vec<_> = pk
+        .fixed_cosets
+        .iter()
+        .map(|poly| evaluator.register_poly(poly.clone()))
+        .collect();
+
+    // Register advice polynomials with the polynomial evaluator
+    let advice_leaves: Vec<_> = advice
+        .iter()
+        .map(|advice| {
+            advice
+                .advice_cosets
+                .iter()
+                .map(|poly| evaluator.register_poly(poly.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // Register instance polynomials with the polynomial evaluator
+    let instance_leaves: Vec<_> = instance
+        .iter()
+        .map(|instance| {
+            instance
+                .instance_cosets
+                .iter()
+                .map(|poly| evaluator.register_poly(poly.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     // Evaluate the h(X) polynomial's constraint system expressions for the permutation constraints.
     let (permutations, permutation_expressions): (Vec<_>, Vec<_>) = permutations
         .into_iter()
-        .zip(advice.iter())
-        .zip(instance.iter())
+        .zip(advice_leaves.iter())
+        .zip(instance_leaves.iter())
         .map(|((permutation, advice), instance)| {
             permutation.construct(
                 pk,
                 &pk.vk.cs.permutation,
                 &pk.permutation,
-                &advice.advice_cosets,
-                &pk.fixed_cosets,
-                &instance.instance_cosets,
+                advice,
+                &pk.fixed_leaves,
+                instance,
                 beta,
                 gamma,
+                &mut evaluator,
             )
         })
         .unzip();
@@ -431,53 +466,49 @@ pub fn create_proof<
         })
         .unzip();
 
-    let expressions = advice
+    let expressions = advice_leaves
         .iter()
-        .zip(instance.iter())
-        .zip(permutation_expressions.into_iter())
-        .zip(lookup_expressions.into_iter())
+        .zip(instance_leaves.iter())
+        .zip(permutation_expressions.iter())
+        .zip(lookup_expressions.iter())
         .flat_map(
-            |(((advice, instance), permutation_expressions), lookup_expressions)| {
+            |(((advice_leaves, instance_leaves), permutation_expressions), lookup_expressions)| {
+                let fixed_leaves = &fixed_leaves;
                 iter::empty()
                     // Custom constraints
                     .chain(meta.gates.iter().flat_map(move |gate| {
-                        gate.polynomials().iter().map(move |poly| {
-                            poly.evaluate(
-                                &|scalar| pk.vk.domain.constant_extended(scalar),
+                        gate.polynomials().iter().map(move |expr| {
+                            let tmp: PolyAST<C::Scalar> = expr.evaluate(
+                                &|scalar| PolyAST::constant(scalar),
                                 &|_| panic!("virtual selectors are removed during optimization"),
                                 &|_, column_index, rotation| {
-                                    pk.vk
-                                        .domain
-                                        .rotate_extended(&pk.fixed_cosets[column_index], rotation)
+                                    fixed_leaves[column_index].with_rotation(rotation).into()
                                 },
                                 &|_, column_index, rotation| {
-                                    pk.vk.domain.rotate_extended(
-                                        &advice.advice_cosets[column_index],
-                                        rotation,
-                                    )
+                                    advice_leaves[column_index].with_rotation(rotation).into()
                                 },
                                 &|_, column_index, rotation| {
-                                    pk.vk.domain.rotate_extended(
-                                        &instance.instance_cosets[column_index],
-                                        rotation,
-                                    )
+                                    instance_leaves[column_index].with_rotation(rotation).into()
                                 },
-                                &|a| -a,
-                                &|a, b| a + &b,
-                                &|a, b| a * &b,
-                                &|a, scalar| a * scalar,
-                            )
+                                &|a: PolyAST<C::Scalar>| -&a,
+                                &|a: PolyAST<C::Scalar>, b: PolyAST<C::Scalar>| &a + &b,
+                                &|a: PolyAST<C::Scalar>, b: PolyAST<C::Scalar>| &a * &b,
+                                &|a: PolyAST<C::Scalar>, scalar: C::Scalar| &a * scalar,
+                            );
+                            tmp
                         })
                     }))
-                    // Permutation constraints, if any.
-                    .chain(permutation_expressions.into_iter())
-                    // Lookup constraints, if any.
-                    .chain(lookup_expressions.into_iter().flatten())
+                // TODO
+                // Permutation constraints, if any.
+                //.chain(permutation_expressions.into_iter())
+                // Lookup constraints, if any.
+                //.chain(lookup_expressions.into_iter().flatten())
             },
         );
 
     // Construct the vanishing argument's h(X) commitments
-    let vanishing = vanishing.construct(params, domain, expressions, y, transcript)?;
+    let vanishing =
+        vanishing.construct(params, domain, expressions, y, transcript, &mut evaluator)?;
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow(&[params.n as u64, 0, 0, 0]);

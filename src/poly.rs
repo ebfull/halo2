@@ -180,6 +180,7 @@ impl<F: Field> Polynomial<Assigned<F>, LagrangeCoeff> {
 }
 
 impl<F: Field> Polynomial<F, ExtendedLagrangeCoeff> {
+    // TODO: should we remove this?
     /// Maps every coefficient `c` in `p` to `1 - c`.
     pub fn one_minus(mut p: Self) -> Self {
         parallelize(&mut p.values, |p, _start| {
@@ -308,5 +309,118 @@ impl Rotation {
     /// The next location in the evaluation domain
     pub fn next() -> Rotation {
         Rotation(1)
+    }
+}
+
+pub(crate) struct PolyEvaluator<F: Field> {
+    polys: Vec<Polynomial<F, ExtendedLagrangeCoeff>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PolyASTLeaf {
+    index: usize,
+    rotation: Rotation,
+}
+
+#[derive(Clone)]
+pub(crate) enum PolyAST<F: Field> {
+    Poly(PolyASTLeaf),
+    Add(Box<PolyAST<F>>, Box<PolyAST<F>>),
+    Mul(Box<PolyAST<F>>, Box<PolyAST<F>>),
+    Scale(Box<PolyAST<F>>, F),
+    Constant(F),
+}
+
+impl<'a, F: Field> Sub<&'a PolyAST<F>> for &'a PolyAST<F> {
+    type Output = PolyAST<F>;
+
+    fn sub(self, other: &'a PolyAST<F>) -> Self::Output {
+        self + &(-other)
+    }
+}
+
+impl<'a, F: Field> Neg for &'a PolyAST<F> {
+    type Output = PolyAST<F>;
+
+    fn neg(self) -> Self::Output {
+        PolyAST::Scale(Box::new(self.clone()), -F::one())
+    }
+}
+
+impl<'a, F: Field> Add<&'a PolyAST<F>> for &'a PolyAST<F> {
+    type Output = PolyAST<F>;
+
+    fn add(self, other: &'a PolyAST<F>) -> Self::Output {
+        PolyAST::Add(Box::new(self.clone()), Box::new(other.clone()))
+    }
+}
+
+impl<'a, F: Field> Mul<&'a PolyAST<F>> for &'a PolyAST<F> {
+    type Output = PolyAST<F>;
+
+    fn mul(self, other: &'a PolyAST<F>) -> Self::Output {
+        PolyAST::Mul(Box::new(self.clone()), Box::new(other.clone()))
+    }
+}
+
+impl<'a, F: Field> Mul<F> for &'a PolyAST<F> {
+    type Output = PolyAST<F>;
+
+    fn mul(self, other: F) -> Self::Output {
+        PolyAST::Scale(Box::new(self.clone()), other)
+    }
+}
+
+impl<F: Field> Default for PolyEvaluator<F> {
+    fn default() -> Self {
+        PolyEvaluator { polys: vec![] }
+    }
+}
+
+impl<F: Field> PolyEvaluator<F> {
+    pub fn register_poly(&mut self, poly: Polynomial<F, ExtendedLagrangeCoeff>) -> PolyASTLeaf {
+        let index = self.polys.len();
+        self.polys.push(poly);
+
+        PolyASTLeaf {
+            index,
+            rotation: Rotation::default(),
+        }
+    }
+
+    pub fn evaluate(
+        &self,
+        ast: &PolyAST<F>,
+        domain: &EvaluationDomain<F>,
+    ) -> Polynomial<F, ExtendedLagrangeCoeff>
+    where
+        F: FieldExt,
+    {
+        unimplemented!()
+    }
+}
+
+impl<F: Field> PolyAST<F> {
+    pub fn constant(constant: F) -> Self {
+        PolyAST::Constant(constant)
+    }
+}
+
+impl PolyASTLeaf {
+    /// Produces a new `PolyASTLeaf` node corresponding to the underlying
+    /// polynomial at a _new_ rotation. Existing rotations applied to this leaf
+    /// node are ignored and the returned polynomial is not rotated _relative_
+    /// to the previous structure.
+    pub fn with_rotation(&self, rotation: Rotation) -> Self {
+        PolyASTLeaf {
+            index: self.index,
+            rotation,
+        }
+    }
+}
+
+impl<F: Field> From<PolyASTLeaf> for PolyAST<F> {
+    fn from(leaf: PolyASTLeaf) -> Self {
+        PolyAST::Poly(leaf)
     }
 }

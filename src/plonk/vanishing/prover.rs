@@ -10,7 +10,7 @@ use crate::{
     poly::{
         commitment::{Blind, Params},
         multiopen::ProverQuery,
-        Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial,
+        Coeff, EvaluationDomain, ExtendedLagrangeCoeff, PolyAST, PolyEvaluator, Polynomial,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
@@ -64,12 +64,16 @@ impl<C: CurveAffine> Committed<C> {
         self,
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
-        expressions: impl Iterator<Item = Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        expressions: impl Iterator<Item = PolyAST<C::Scalar>>,
         y: ChallengeY<C>,
         transcript: &mut T,
+        evaluator: &mut PolyEvaluator<C::Scalar>,
     ) -> Result<Constructed<C>, Error> {
         // Evaluate the h(X) polynomial's constraint system expressions for the constraints provided
-        let h_poly = expressions.fold(domain.empty_extended(), |h_poly, v| h_poly * *y + &v);
+        let h_poly = expressions
+            .reduce(|h_poly, v| &(&h_poly * *y) + &v) // Fold the gates together with the y challenge
+            .unwrap_or(PolyAST::constant(C::Scalar::zero()));
+        let h_poly = evaluator.evaluate(&h_poly, domain); // Evaluate the h(X) polynomial
 
         // Divide by t(X) = X^{params.n} - 1.
         let h_poly = domain.divide_by_vanishing_poly(h_poly);
